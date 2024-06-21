@@ -1,0 +1,12 @@
+[package]
+name = "rust_msdparser"
+version = "0.1.0"
+authors = ["smdbs"]
+edition = "2021"
+description = "Rust version of the MSD parser by Garcia (https://github.com/garcia/msdparser/)."
+readme = "README.md"
+
+
+[dependencies]
+lazy_static = "1.4.0"
+regex = "1.10.5"
