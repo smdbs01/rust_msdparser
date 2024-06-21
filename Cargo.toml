@@ -9,6 +9,9 @@ repository = "https://github.com/smdbs01/rust_msdparser"
 license = "MIT"
 keywords = ["msd", "parser", "msdparser"]
 categories = ["parser-implementations"]
+exclude = [
+  "testdata/*"
+]
 
 [dependencies]
 lazy_static = "1.4.0"
