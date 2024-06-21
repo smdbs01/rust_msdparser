@@ -34,7 +34,7 @@ impl From<String> for MSDParameterError {
 /// 
 /// Stringifying an `MSDParameter` converts it back into MSD, escaping
 /// any backslashes `\\` or special substrings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, PartialOrd)]
 pub struct MSDParameter {
     pub components: Vec<String>,
 }
@@ -49,7 +49,9 @@ impl MSDParameter {
     /// The first MSD component, the part immediately after the `#` sign.
     /// 
     /// Returns `None` if `self.components` is an empty vector.
-    /// (`parse_msd` will never produce such a parameter).
+    /// ([`parse_msd`] will never produce such a parameter).
+    /// 
+    /// [`parse_msd`]: ../parser/fn.parse_msd.html
     pub fn key(&self) -> Option<String> {
         self.components.get(0).map(|s| s.clone())
     }
@@ -65,17 +67,23 @@ impl MSDParameter {
     /// Serialize an MSD component (key or value).
     /// 
     /// By default, backslashes (`\\`) and special substrings (`:`, `;`, and `//`) are escaped.
-    /// Setting `escapes` to False will return the component unchanged, unless it contains a special substring,
+    /// Setting `escapes` to `false` will return the component unchanged, unless it contains a special substring,
     /// in which case an error is returned.
-    pub fn serialize_component(component: &str, escapes: bool) -> Result<String, String> {
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if `component` contains a special substring and `escapes` is false.
+    pub fn serialize_component(component: &str, escapes: bool) -> Result<String, MSDParameterError> {
         if escapes {
+            // Escape all special characters
+            // Handle double backslashes first to avoid double escaping
             let mut result = component.to_string().replace("\\", "\\\\");
             for &esc in Self::MUST_ESCAPE.iter() {
                 result = result.replace(&esc, &format!("\\{}", esc));
             }
             Ok(result)
         } else if Self::MUST_ESCAPE.iter().any(|&esc| component.contains(esc)) {
-            Err(format!("{} can't be serialized without escapes", component))
+            Err(MSDParameterError::SerializeError(format!("{} can't be serialized without escapes", component)))
         } else {
             Ok(component.to_string())
         }
@@ -84,8 +92,12 @@ impl MSDParameter {
     /// Serialize the key/value pair to MSD, including the surrounding `#:;` characters.
     /// 
     /// By default, backslashes (`\\`) and special substrings (`:`, `;`, and `//`) are escaped.
-    /// Setting `escapes` to False will return the component unchanged, unless it contains a special substring,
+    /// Setting `escapes` to `false` will return the component unchanged, unless it contains a special substring,
     /// in which case an error is returned.
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if `component` contains a special substring and `escapes` is false.
     pub fn serialize<W: Write>(&self, writer: &mut W, escapes: bool) -> Result<(), MSDParameterError> {
         writer.write_all(b"#")?;
         for (i, component) in self.components.iter().enumerate() {
@@ -99,10 +111,16 @@ impl MSDParameter {
     }
 
     /// An alternative to the `to_string` method, allowing for the `escapes` parameter.
-    pub fn to_string_with_escapes(&self, escapes: bool) -> String {
+    ///
+    /// See [Serialize](struct.MSDParameter.html#method.serialize)
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if `component` contains a special substring and `escapes` is false.
+    pub fn to_string_with_escapes(&self, escapes: bool) -> Result<String, MSDParameterError> {
         let mut output = Vec::new();
-        self.serialize(&mut output, escapes).unwrap();
-        String::from_utf8_lossy(&output).to_string()
+        self.serialize(&mut output, escapes)?;
+        Ok(String::from_utf8_lossy(&output).to_string())
     }
 }
 
@@ -114,7 +132,6 @@ impl fmt::Display for MSDParameter {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,8 +140,8 @@ mod tests {
     fn test_constructor() {
         let param = MSDParameter::new(vec!["key".to_string(), "value".to_string()]);
 
-        assert_eq!("key", param.key().unwrap());
-        assert_eq!("value", param.value().unwrap());
+        assert_eq!("key", param.key().unwrap_or("missing key".to_string()));
+        assert_eq!("value", param.value().unwrap_or("missing value".to_string()));
         assert_eq!(param.components[0], "key");
         assert_eq!(param.components[1], "value");
     }
@@ -133,7 +150,7 @@ mod tests {
     fn test_key_without_value() {
         let param = MSDParameter::new(vec!["key".to_string()]);
 
-        assert_eq!("key", param.key().unwrap());
+        assert_eq!("key", param.key().unwrap_or("missing key".to_string()));
         assert!(param.value().is_none());
     }
 
@@ -150,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_str_without_escapes() {
+    fn test_str_without_escapes() -> Result<(), MSDParameterError> {
         let param = MSDParameter::new(vec!["key".to_string(), "value".to_string()]);
         let multi_value_param = MSDParameter::new(vec!["key".to_string(), "abc".to_string(), "def".to_string()]);
         let param_with_literal_backslashes = MSDParameter::new(vec!["ABC\\DEF".to_string(), "abc\\def".to_string()]);
@@ -163,12 +180,14 @@ mod tests {
             MSDParameter::new(vec!["ABCDEF".to_string(), "abc//def".to_string()]),
         ];
 
-        assert_eq!("#key:value;", param.to_string_with_escapes(false));
-        assert_eq!("#key:abc:def;", multi_value_param.to_string_with_escapes(false));
-        assert_eq!("#ABC\\DEF:abc\\def;", param_with_literal_backslashes.to_string_with_escapes(false));
+        assert_eq!("#key:value;", param.to_string_with_escapes(false)?);
+        assert_eq!("#key:abc:def;", multi_value_param.to_string_with_escapes(false)?);
+        assert_eq!("#ABC\\DEF:abc\\def;", param_with_literal_backslashes.to_string_with_escapes(false)?);
         for param in invalid_params {
             assert!(param.serialize(&mut Vec::new(), false).is_err());
         }
+
+        Ok(())
     }
 
 }

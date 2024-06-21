@@ -5,7 +5,7 @@ use crate::lexer::{lex_msd, MSDLexer, MSDToken, MSDTokenMatch};
 use crate::parameter::MSDParameter;
 
 /// Custom error type for MSD parsing.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Hash, PartialOrd)]
 pub struct MSDParserError(pub String);
 
 impl fmt::Display for MSDParserError {
@@ -18,7 +18,8 @@ impl error::Error for MSDParserError {}
 
 /// Parser for MSD data.
 /// 
-/// Implements the `Iterator` trait of type `<Result<MSDParameter, MSDParserError>>`.
+/// Implements the [`Iterator`] trait of type [`Result<MSDParameter, MSDParserError>`].
+#[derive(Debug, Clone)]
 pub struct MSDParser<R> {
     ignored_stray_text: bool,
 
@@ -26,6 +27,19 @@ pub struct MSDParser<R> {
     inside_parameter: bool,
     last_key: Option<String>,
     tokens: MSDLexer<R>,
+}
+
+impl <R: Read> fmt::Display for MSDParser<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f, 
+            "MSDParser: {{\n\tignored_stray_text: {},\n\tcomponents: {:?},\n\tinside_parameter: {},\n\tlast_key: {:?},\n}}", 
+            self.ignored_stray_text,
+            self.components,
+            self.inside_parameter,
+            self.last_key
+        )
+    }
 }
 
 impl <R: Read> MSDParser<R> {
@@ -45,14 +59,13 @@ impl <R: Read> MSDParser<R> {
         }
     }
 
-    /// Get the next parameter.
+    /// Get the next [`MSDParameter`] from the stream. 
     /// 
-    /// Returns `None` if there are no more parameters.
+    /// [`MSDParameter`]: ../parameter/struct.MSDParameter.html
     /// 
-    /// `Some(Err(MSDParserError))` if non-whitespace text is encountered between parameters, unless
-    /// `ignore_stray_text` is true, in which case the stray text is simply discarded.
+    /// # Errors
     /// 
-    /// `Some(Ok(MSDParameter))` otherwise.
+    /// Returns an error if a stray text token is encountered and `ignore_stray_text` is `false`.
     pub fn next_parameter(&mut self) -> Option<Result<MSDParameter, MSDParserError>> {
         while let Some(MSDTokenMatch { token, text }) = self.tokens.next() {
             // println!("{} {}", token, text);
@@ -60,20 +73,30 @@ impl <R: Read> MSDParser<R> {
                 MSDToken::Text | MSDToken::Escape => {
                     let escaped_text = if token == MSDToken::Escape {
                         text[1..].to_owned()
-                    } else { text.to_owned() };
+                    } else { 
+                        text.to_owned() 
+                    };
 
                     if self.inside_parameter {
-                        self.components.last_mut().unwrap().push_str(&escaped_text);
+                        if let Some(last_component) = self.components.last_mut() {
+                            last_component.push_str(&escaped_text);
+                        }
                     } else if !self.ignored_stray_text {
-                        if !text.is_empty() && text != "\u{feff}" && text != "\n" && text != "\r" {
-                            let at_location = 
-                                if self.last_key.is_none() { "at start of document".to_string() }
-                                else { format!("after '{}' parameter", self.last_key.as_ref().unwrap()) };
-                            let first_char = text.trim_start().chars().next().unwrap();
-                            
-                            return Some(
-                                Err(MSDParserError(format!("stray '{}' encountered {}", first_char, at_location)))
-                            );
+                        if !text.trim().is_empty() && text != "\u{feff}" {
+                            let at_location = if let Some(key) = &self.last_key {
+                                format!("after '{}' parameter", key)
+                            } else {
+                                "at start of document".to_string()
+                            };
+
+                            if let Some(first_char) = text.trim_start().chars().next() {
+                                return Some(
+                                    Err(MSDParserError(format!("stray '{}' encountered {}", first_char, at_location)))
+                                );
+                            } else {
+                                // Unreachable?
+                                return Some(Err(MSDParserError(format!("stray text {} encountered {}", text, at_location))));
+                            }
                         }
                     }
                 },
@@ -124,7 +147,7 @@ impl <R: Read> Iterator for MSDParser<R> {
 
     /// Get the next parameter.
     /// 
-    /// See `MSDParser::next_parameter`.
+    /// See [`MSDParser::next_parameter`].
     fn next(&mut self) -> Option<Self::Item> {
         self.next_parameter()
     }   
@@ -135,14 +158,21 @@ impl <R: Read> Iterator for MSDParser<R> {
 /// `escapes` indicates whether or not to escape special text.
 /// `ignore_stray_text` indicates whether or not to ignore stray text.
 /// 
-/// Returns an iterator of type `<Result<MSDParameter, MSDParserError>>`.
+/// Returns an [`MSDParser`], which is an [`Iterator`] of type [`Result<MSDParameter, MSDParserError>`].
+/// 
+/// See also [`MSDParser`] and [`MSDParameter`].
+/// 
+/// [`MSDParser`]: struct.MSDParser.html
+/// [`MSDParameter`]: ../parameter/struct.MSDParameter.html
 /// 
 /// # Examples
 /// 
 /// ```rust
-/// use rust_msdparser::{MSDParameter, parse_msd};
-/// use std::vec::Vec;
-/// 
+/// # use msdparser::{MSDParameter, parse_msd};
+/// # use std::error::Error;
+/// # use std::vec::Vec;
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// #
 /// let example_input = b"\
 /// #VERSION:0.83;
 /// #TITLE:Springtime;
@@ -152,22 +182,30 @@ impl <R: Read> Iterator for MSDParser<R> {
 /// 
 /// // here we set `escapes` to true and `ignore_stray_text` to false
 /// // which is the default value in the original python library
-/// for parameter in parse_msd(example_input.as_ref(), true, false).take_while(|p| p.is_ok()) {
-///     result.push(parameter.unwrap());
+/// for parameter in parse_msd(example_input.as_ref(), true, false) {
+///     match parameter {
+///         Ok(parameter) => result.push(parameter),
+///         Err(e) => return Err(Box::new(e)),
+///     }   
 /// }
-/// println!("{:?}", result);
+/// 
 /// assert_eq!(result.len(), 4);
-/// assert_eq!(result[0].key().unwrap(), "VERSION".to_string());
-/// assert_eq!(result[1].value().unwrap(), "Springtime".to_string());
-/// assert_eq!(result[2].value().unwrap(), "".to_string());
-/// assert_eq!(result[3].key().unwrap(), "ARTIST".to_string());
+/// assert_eq!(result[0].key().ok_or("missing key".to_string())?, "VERSION".to_string());
+/// assert_eq!(result[1].value().ok_or("missing value".to_string())?, "Springtime".to_string());
+/// assert_eq!(result[2].value().ok_or("missing value".to_string())?, "".to_string());
+/// assert_eq!(result[3].key().ok_or("missing key".to_string())?, "ARTIST".to_string());
+/// #
+/// #   Ok(())
+/// # }
 /// ```
 /// 
 /// Below is an example of stray text resulting in an error:
 /// 
 /// ```rust
-/// use rust_msdparser::{MSDParameter, parse_msd, MSDParserError};
-/// 
+/// # use msdparser::{MSDParameter, parse_msd, MSDParserError};
+/// # use std::error::Error;
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// #
 /// let example_input = b"\
 /// #A:B;
 /// C:D;";
@@ -176,6 +214,9 @@ impl <R: Read> Iterator for MSDParser<R> {
 /// 
 /// assert_eq!(parser.next(), Some(Ok(MSDParameter::new(vec!["A".to_string(), "B".to_string()]))));
 /// assert_eq!(parser.next(), Some(Err(MSDParserError("stray 'C' encountered after 'A' parameter".to_string()))));
+/// #
+/// #   Ok(())
+/// # }
 /// ```
 /// 
 pub fn parse_msd<R: Read>(input: R, escapes: bool, ignore_stray_text: bool) -> MSDParser<R> {
@@ -185,6 +226,8 @@ pub fn parse_msd<R: Read>(input: R, escapes: bool, ignore_stray_text: bool) -> M
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
     use super::*;
 
     fn get_next_parameter(parser: &mut MSDParser<&[u8]>) -> Option<MSDParameter> {
@@ -354,6 +397,18 @@ mod tests {
         assert_eq!(MSDParameter::new(vec!["E\\#F".to_string(), "G\\\\H".to_string()]), get_next_parameter(&mut parser).unwrap());
         assert_eq!(MSDParameter::new(vec!["LF".to_string(), "\\\nLF".to_string()]), get_next_parameter(&mut parser).unwrap());
         assert_eq!(None, parser.next());
+    }
+
+    #[test]
+    fn test_file() {
+        let path = Path::new("testdata/Springtime.ssc");
+        let input = fs::read(path).unwrap();
+        
+        let mut parser: MSDParser<&[u8]> = parse_msd(input.as_ref(), true, false);
+        
+        assert_eq!(MSDParameter::new(vec!["VERSION".to_string(), "0.83".to_string()]), get_next_parameter(&mut parser).unwrap());
+        assert_eq!(MSDParameter::new(vec!["TITLE".to_string(), "Springtime".to_string()]), get_next_parameter(&mut parser).unwrap());
+        assert_eq!(MSDParameter::new(vec!["SUBTITLE".to_string(), "".to_string()]), get_next_parameter(&mut parser).unwrap());
     }
 }
 

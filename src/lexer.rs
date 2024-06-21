@@ -2,7 +2,7 @@ use std::{fmt, io::Read};
 
 use regex::Regex;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Hash, PartialOrd)]
 pub enum MSDToken {
     Text,
     StartParameter,
@@ -18,7 +18,7 @@ impl fmt::Display for MSDToken {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct LexerPattern {
     regex: Regex,
     token_outside_param: MSDToken,
@@ -63,7 +63,7 @@ lazy_static::lazy_static! {
 const BUFFER_SIZE: usize = 4096;
 
 /// Match for a LexerPattern
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Hash, PartialOrd)]
 pub struct MSDTokenMatch {
     pub token: MSDToken,
     pub text: String,
@@ -80,7 +80,8 @@ impl MSDTokenMatch {
 
 /// Lexer for MSD files.
 /// 
-/// Implements an iterator that yields `MSDTokenMatch`s
+/// Implements an [`Iterator`] that yields [`MSDTokenMatch`]s
+#[derive(Debug, Clone)]
 pub struct MSDLexer<R> {
     reader: R,
     msd_buffer: String,
@@ -117,15 +118,24 @@ impl<R: Read> MSDLexer<R> {
     /// 
     /// Returns None if the end of the stream has been reached or no patterns match.
     pub fn next_token(&mut self) -> Option<MSDTokenMatch> {
+        // End until both stream and buffer are empty
         while !(self.done_reading && self.msd_buffer.is_empty()) {
+            // Read the next chunk
             let read = self.reader.read(&mut self.read_buffer).unwrap();
+
+            // End of the stream
             if read == 0 { self.done_reading = true; }
+
+            // Add the next chunk to the buffer
             self.msd_buffer += String::from_utf8_lossy(&self.read_buffer[..read]).as_ref();
 
+            // Enforcing that the MSD buffer always either contains a newline or the rest of the stream,
+            // so that comments, escapes, etc. don't get split in half.
             while self.msd_buffer.contains('\n') || self.msd_buffer.contains('\r') || (self.done_reading && self.msd_buffer.len() > 0) {
                 for pattern in &self.lexer_patterns {
                     if let Some(m) = pattern.regex.find(&self.msd_buffer) {
-                        let matched_text = self.msd_buffer.get(m.start()..m.end()).unwrap().to_owned();
+                        let matched_text = self.msd_buffer.get(..m.end()).unwrap().to_owned();
+                        // Remove the matched section from the buffer
                         self.msd_buffer = self.msd_buffer.get(m.end()..).unwrap().to_string();
 
                         let mut token = 
@@ -133,11 +143,12 @@ impl<R: Read> MSDLexer<R> {
                             else { pattern.token_outside_param };
                         
                         // Recovery from missing `;` at the end of a line
-                        if pattern.regex.as_str() == POUND 
-                        && token == MSDToken::Text
-                        && (self.last_text_token.clone().unwrap_or("".to_string()).ends_with("\n") 
-                        || self.last_text_token.clone().unwrap_or("".to_string()).ends_with("\r")) {
-                            token = MSDToken::StartParameter;
+                        if let Some(last_token) = self.last_text_token.clone() {
+                            if last_token.ends_with("\n") || last_token.ends_with("\r") {
+                                if pattern.regex.as_str() == POUND && token == MSDToken::Text {
+                                    token = MSDToken::StartParameter;
+                                }
+                            }
                         }
 
                         match token {
@@ -164,12 +175,14 @@ impl <R: Read> Iterator for MSDLexer<R> {
     }  
 }
 
-/// Create a new `MSDLexer` from a `Read` instance and whether or not to escape special characters.
+/// Create a new [`MSDLexer`] from a [`Read`] impl and whether or not to escape special characters.
 /// 
-/// `MSDLexer` is an iterator that yields `MSDTokenMatch`s, 
-/// which consists of a `MSDToken` and the matched text.
+/// [`MSDLexer`] is an [`Iterator`] that yields [`MSDTokenMatch`]s, 
+/// which consists of a [`MSDToken`] and the matched text.
 /// 
-/// See `parser::MSDParser` for an example usage.
+/// In practice you don't have to call this function directly, as it is called during [`parse_msd`].
+/// 
+/// [`parse_msd`]: ../parser/fn.parse_msd.html
 pub fn lex_msd<R: Read>(reader: R, escapes: bool) -> MSDLexer<R> {
     MSDLexer::new(reader, escapes)
 }
